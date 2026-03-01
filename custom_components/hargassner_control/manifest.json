@@ -1,0 +1,12 @@
+{
+  "domain": "hargassner_control",
+  "name": "Hargassner Control",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/knirzinger/hargassner-ha",
+  "issue_tracker": "https://github.com/knirzinger/hargassner-ha/issues",
+  "codeowners": ["@knirzinger"],
+  "requirements": [],
+  "iot_class": "cloud_polling",
+  "quality_scale": "custom"
+}
