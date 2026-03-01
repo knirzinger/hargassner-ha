@@ -1,0 +1,75 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hargassner Control",
+        "description": "Geben Sie Ihre Hargassner Connect Zugangsdaten ein. Die OAuth-Konfiguration und die Installations-ID werden automatisch erkannt.",
+        "data": {"username": "E-Mail-Adresse", "password": "Passwort"}
+      },
+      "select_installation": {
+        "title": "Installation auswählen",
+        "description": "{count} Installationen gefunden. Wählen Sie den zu integrierenden Kessel.",
+        "data": {"installation_id": "Installation"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Das Hargassner Connect Portal ist nicht erreichbar. Bitte Internetverbindung prüfen.",
+      "invalid_auth": "Ungültige E-Mail-Adresse oder Passwort.",
+      "secret_extraction_failed": "OAuth-Konfiguration konnte nicht vom Portal gelesen werden. Bitte ein GitHub-Issue öffnen.",
+      "unknown": "Unerwarteter Fehler. Bitte Home Assistant Logs prüfen."
+    },
+    "abort": {"already_configured": "Dieses Hargassner-Konto ist bereits konfiguriert."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Zugangsdaten aktualisieren",
+        "data": {"username": "E-Mail-Adresse", "password": "Passwort"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Das Hargassner Connect Portal ist nicht erreichbar.",
+      "invalid_auth": "Ungültige E-Mail-Adresse oder Passwort.",
+      "secret_extraction_failed": "OAuth-Konfiguration konnte nicht gelesen werden.",
+      "unknown": "Unerwarteter Fehler."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_sync": {"name": "Letzter Sync"},
+      "connection": {"name": "Verbindungsstatus"}
+    },
+    "number": {
+      "room_temperature_correction": {"name": "Temperatur Korrektur"},
+      "room_temperature_heating": {"name": "Raumtemperatur Heizen"},
+      "room_temperature_reduction": {"name": "Raumtemperatur Absenkung"},
+      "steepness": {"name": "Heizkurve Steilheit"},
+      "deactivation_limit_heating": {"name": "Heizen Aus Temp"},
+      "deactivation_limit_reduction_day": {"name": "Tagabsenkung Aus Temp"},
+      "deactivation_limit_reduction_night": {"name": "Nachtabsenkung Aus Temp"},
+      "pellet_stock": {"name": "Pellets Lagerstand"}
+    },
+    "select": {
+      "heating_mode": {
+        "name": "Heizkreis Modus",
+        "state": {
+          "MODE_AUTOMATIC": "Automatik",
+          "MODE_HEATING": "Heizen",
+          "MODE_REDUCTION": "Absenkung",
+          "MODE_OFF": "Aus"
+        }
+      },
+      "solar_mode": {
+        "name": "Solar Modus",
+        "state": {"MODE_ON": "Ein", "MODE_OFF": "Aus"}
+      },
+      "bathroom_heating": {
+        "name": "Badewanne / Einmalladung",
+        "state": {"MODE_ON": "Ein", "MODE_OFF": "Aus"}
+      }
+    },
+    "button": {
+      "force_charge": {"name": "Warmwasser Sofort Laden"}
+    }
+  }
+}
