@@ -227,4 +227,4 @@ MIT — see [LICENSE](LICENSE) file.
 
 ## Author
 
-Ronald Knirzinger · [Etwas Anders by Franz Stelzhamerhof e.U.](https://etwasanders.at) · Schildorn, Upper Austria
+Ronald Knirzinger
