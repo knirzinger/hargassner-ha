@@ -1,0 +1,75 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hargassner Control",
+        "description": "Enter your Hargassner Connect account credentials. The OAuth configuration and installation ID are discovered automatically.",
+        "data": {"username": "Email address", "password": "Password"}
+      },
+      "select_installation": {
+        "title": "Select Installation",
+        "description": "Found {count} installations on this account. Select the boiler to integrate.",
+        "data": {"installation_id": "Installation"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach the Hargassner Connect portal. Check your internet connection.",
+      "invalid_auth": "Invalid email or password.",
+      "secret_extraction_failed": "Could not read OAuth configuration from the portal. Please open a GitHub issue.",
+      "unknown": "Unexpected error. Check Home Assistant logs."
+    },
+    "abort": {"already_configured": "This Hargassner account is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Update Credentials",
+        "data": {"username": "Email address", "password": "Password"}
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach the Hargassner Connect portal.",
+      "invalid_auth": "Invalid email or password.",
+      "secret_extraction_failed": "Could not read OAuth configuration from the portal.",
+      "unknown": "Unexpected error."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_sync": {"name": "Last Sync"},
+      "connection": {"name": "Connection Status"}
+    },
+    "number": {
+      "room_temperature_correction": {"name": "Temperature Correction"},
+      "room_temperature_heating": {"name": "Room Temperature (Heating)"},
+      "room_temperature_reduction": {"name": "Room Temperature (Reduction)"},
+      "steepness": {"name": "Heating Curve Steepness"},
+      "deactivation_limit_heating": {"name": "Heating Off Temp"},
+      "deactivation_limit_reduction_day": {"name": "Day Setback Off Temp"},
+      "deactivation_limit_reduction_night": {"name": "Night Setback Off Temp"},
+      "pellet_stock": {"name": "Pellet Stock"}
+    },
+    "select": {
+      "heating_mode": {
+        "name": "Heating Mode",
+        "state": {
+          "MODE_AUTOMATIC": "Automatic",
+          "MODE_HEATING": "Heating",
+          "MODE_REDUCTION": "Reduction",
+          "MODE_OFF": "Off"
+        }
+      },
+      "solar_mode": {
+        "name": "Solar Mode",
+        "state": {"MODE_ON": "On", "MODE_OFF": "Off"}
+      },
+      "bathroom_heating": {
+        "name": "Bathroom Heating",
+        "state": {"MODE_ON": "On", "MODE_OFF": "Off"}
+      }
+    },
+    "button": {
+      "force_charge": {"name": "Force Hot Water Charge"}
+    }
+  }
+}
