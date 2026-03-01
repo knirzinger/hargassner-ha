@@ -52,24 +52,26 @@ _OAUTH_CREDS_RE = re.compile(r'o=\"(\d+)\",n=\"([^\"]+)\"')
 
 
 # ---------------------------------------------------------------------------
-# Domain enums
+# Domain enums  (values are lowercase — used as HA translation keys)
+# The API itself uses uppercase MODE_* strings; conversion happens in
+# _parse_widgets (API → HA) and async_set_* (HA → API).
 # ---------------------------------------------------------------------------
 
 class HeatingMode(StrEnum):
-    AUTOMATIC = "MODE_AUTOMATIC"
-    HEATING   = "MODE_HEATING"
-    REDUCTION = "MODE_REDUCTION"
-    OFF       = "MODE_OFF"
+    AUTOMATIC = "mode_automatic"
+    HEATING   = "mode_heating"
+    REDUCTION = "mode_reduction"
+    OFF       = "mode_off"
 
 
 class SolarMode(StrEnum):
-    ON  = "MODE_ON"
-    OFF = "MODE_OFF"
+    ON  = "mode_on"
+    OFF = "mode_off"
 
 
 class BathroomHeating(StrEnum):
-    ON  = "MODE_ON"
-    OFF = "MODE_OFF"
+    ON  = "mode_on"
+    OFF = "mode_off"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +121,7 @@ class HeatingCircuitData:
     deactivation_limit_heating: float           = 15.0
     deactivation_limit_reduction_day: float     = 15.0
     deactivation_limit_reduction_night: float   = 15.0
-    bathroom_heating: str                       = "MODE_OFF"
+    bathroom_heating: str                       = "mode_off"
 
 
 @dataclass
@@ -131,7 +133,7 @@ class BoilerData:
 
 @dataclass
 class BufferData:
-    solar_mode_active: str    = "MODE_OFF"
+    solar_mode_active: str    = "mode_off"
     temperature: float | None = None
 
 
@@ -485,6 +487,13 @@ class HargassnerApiClient:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _api_to_ha_mode(value: Any) -> str:
+        """Convert API uppercase MODE_* string to lowercase HA translation key."""
+        if isinstance(value, str):
+            return value.lower()
+        return "unknown"
+
     def _parse_widgets(self, raw: dict) -> WidgetSnapshot:
         snap = WidgetSnapshot(raw=raw)
         for w in raw.get("data", []):
@@ -493,7 +502,7 @@ class HargassnerApiClient:
 
             if wtype == "HEATING_CIRCUIT_RADIATOR":
                 snap.heating_circuit = HeatingCircuitData(
-                    mode=self._pv(params, "mode", "unknown"),
+                    mode=self._api_to_ha_mode(self._pv(params, "mode", "unknown")),
                     room_temp_correction=float(
                         self._pv(params, "room_temperature_correction", 0.0)
                     ),
@@ -513,7 +522,9 @@ class HargassnerApiClient:
                     deactivation_limit_reduction_night=float(
                         self._pv(params, "deactivation_limit_reduction_night", 15.0)
                     ),
-                    bathroom_heating=self._pv(params, "bathroom_heating", "MODE_OFF"),
+                    bathroom_heating=self._api_to_ha_mode(
+                        self._pv(params, "bathroom_heating", "MODE_OFF")
+                    ),
                 )
             elif wtype == "BOILER":
                 snap.boiler = BoilerData(
@@ -526,7 +537,9 @@ class HargassnerApiClient:
                     snap.pellet_stock_kg = self._safe_float(pellets)
             elif wtype == "BUFFER":
                 snap.buffer = BufferData(
-                    solar_mode_active=self._pv(params, "solar_mode_active", "MODE_OFF"),
+                    solar_mode_active=self._api_to_ha_mode(
+                        self._pv(params, "solar_mode_active", "MODE_OFF")
+                    ),
                     temperature=self._safe_float(self._pv(params, "buffer_temperature")),
                 )
             elif wtype == "HOT_WATER":
@@ -539,11 +552,12 @@ class HargassnerApiClient:
 
     # ------------------------------------------------------------------
     # Write — Heating Circuit
+    # (HA uses lowercase mode keys; API expects uppercase MODE_* strings)
     # ------------------------------------------------------------------
 
     async def async_set_heating_mode(self, mode: HeatingMode | str) -> None:
         await self._async_patch(
-            "widgets/heating-circuits/1/parameters/mode", str(mode)
+            "widgets/heating-circuits/1/parameters/mode", str(mode).upper()
         )
 
     async def async_set_room_temp_correction(self, value: float) -> None:
@@ -572,7 +586,7 @@ class HargassnerApiClient:
 
     async def async_set_bathroom_heating(self, mode: BathroomHeating | str) -> None:
         await self._async_patch(
-            "widgets/heating-circuits/1/parameters/bathroom-heating", str(mode)
+            "widgets/heating-circuits/1/parameters/bathroom-heating", str(mode).upper()
         )
 
     async def async_set_deactivation_limit_heating(self, value: float) -> None:
@@ -611,5 +625,5 @@ class HargassnerApiClient:
 
     async def async_set_solar_mode(self, mode: SolarMode | str) -> None:
         await self._async_patch(
-            "widgets/buffer/default/parameters/solar-mode-active", str(mode)
+            "widgets/buffer/default/parameters/solar-mode-active", str(mode).upper()
         )
