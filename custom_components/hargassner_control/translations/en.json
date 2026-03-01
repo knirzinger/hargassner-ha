@@ -53,19 +53,19 @@
       "heating_mode": {
         "name": "Heating Mode",
         "state": {
-          "MODE_AUTOMATIC": "Automatic",
-          "MODE_HEATING": "Heating",
-          "MODE_REDUCTION": "Reduction",
-          "MODE_OFF": "Off"
+          "mode_automatic": "Automatic",
+          "mode_heating": "Heating",
+          "mode_reduction": "Reduction",
+          "mode_off": "Off"
         }
       },
       "solar_mode": {
         "name": "Solar Mode",
-        "state": {"MODE_ON": "On", "MODE_OFF": "Off"}
+        "state": {"mode_on": "On", "mode_off": "Off"}
       },
       "bathroom_heating": {
         "name": "Bathroom Heating",
-        "state": {"MODE_ON": "On", "MODE_OFF": "Off"}
+        "state": {"mode_on": "On", "mode_off": "Off"}
       }
     },
     "button": {
