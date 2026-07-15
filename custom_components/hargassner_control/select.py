@@ -1,25 +1,30 @@
 """
 Select entities for the Hargassner Connect integration.
 
-Each SelectEntity maps to one writable enum parameter on the boiler.
-Reads come from the shared coordinator (WidgetSnapshot).
-Writes go directly to the API then trigger a coordinator refresh.
+Options are taken from the live API (so all modes a device supports appear
+automatically, e.g. the one-time bridge heating/reduction modes). Option strings
+are lowercased for HA/translation keys and upper-cased again on write to match
+the API (MODE_AUTOMATIC, PROGRAM_BOILER, ...).
 """
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import HargassnerCoordinator
-from .api_client import BathroomHeating, HeatingMode, SolarMode, WidgetSnapshot
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    WIDGET_BUFFER,
+    WIDGET_HEATER,
+    WIDGET_HEATING_CIRCUIT,
+)
+from .coordinator import HargassnerCoordinator
 from .number import _device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,76 +32,93 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, kw_only=True)
 class HargassnerSelectDescription(SelectEntityDescription):
-    """Extends SelectEntityDescription with Hargassner-specific fields."""
+    """Select description bound to a widget parameter."""
 
-    options: list[str]
-    value_fn: Callable[[WidgetSnapshot], str | None]
-    set_option_fn: Callable[[Any, str], Any]
+    widget_prefix: str
+    param_key: str
 
 
 SELECT_DESCRIPTIONS: tuple[HargassnerSelectDescription, ...] = (
     HargassnerSelectDescription(
         key="heating_mode",
         translation_key="heating_mode",
-        name="Heating Mode",
-        options=[m.value for m in HeatingMode],
-        value_fn=lambda s: s.heating_circuit.mode,
-        set_option_fn=lambda client, v: client.async_set_heating_mode(v),
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="mode",
     ),
     HargassnerSelectDescription(
         key="solar_mode",
         translation_key="solar_mode",
-        name="Solar Mode",
-        options=[m.value for m in SolarMode],
-        value_fn=lambda s: s.buffer.solar_mode_active,
-        set_option_fn=lambda client, v: client.async_set_solar_mode(v),
+        widget_prefix=WIDGET_BUFFER,
+        param_key="solar_mode_active",
     ),
+    # NEW in 0.1.2 — heater operating program
+    HargassnerSelectDescription(
+        key="heater_program",
+        translation_key="heater_program",
+        widget_prefix=WIDGET_HEATER,
+        param_key="program",
+        icon="mdi:fire",
+    ),
+    # Only appears on devices that expose it (absent on Classic)
     HargassnerSelectDescription(
         key="bathroom_heating",
         translation_key="bathroom_heating",
-        name="Bathroom Heating (Badewanne)",
-        options=[m.value for m in BathroomHeating],
-        value_fn=lambda s: s.heating_circuit.bathroom_heating,
-        set_option_fn=lambda client, v: client.async_set_bathroom_heating(v),
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="bathroom_heating",
     ),
 )
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: Any,
-    async_add_entities: AddEntitiesCallback,
+    hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up Hargassner select entities from a config entry."""
+    """Create select entities for enum parameters present in the payload."""
     coordinator: HargassnerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        HargassnerSelectEntity(coordinator, description)
-        for description in SELECT_DESCRIPTIONS
-    )
+    data = coordinator.data
+    if data is None:
+        return
+    entities = []
+    for desc in SELECT_DESCRIPTIONS:
+        param = data.param(desc.widget_prefix, desc.param_key)
+        if param is not None and param.options:
+            entities.append(HargassnerSelectEntity(coordinator, desc))
+    async_add_entities(entities)
 
 
 class HargassnerSelectEntity(CoordinatorEntity[HargassnerCoordinator], SelectEntity):
     """A controllable enum parameter on the Hargassner boiler."""
 
     _attr_has_entity_name = True
+    entity_description: HargassnerSelectDescription
 
     def __init__(
-        self,
-        coordinator: HargassnerCoordinator,
-        description: HargassnerSelectDescription,
+        self, coordinator: HargassnerCoordinator, description: HargassnerSelectDescription
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{description.key}"
-        self._attr_options = description.options
         self._attr_device_info = _device_info(coordinator)
+        param = self._param
+        api_options = param.options if param and param.options else []
+        self._attr_options = [str(o).lower() for o in api_options]
+
+    @property
+    def _param(self):
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return data.param(self.entity_description.widget_prefix, self.entity_description.param_key)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._param is not None
 
     @property
     def current_option(self) -> str | None:
-        """Return the current option from the coordinator snapshot."""
-        if self.coordinator.data is None:
+        param = self._param
+        if not param or param.value is None:
             return None
-        value = self.entity_description.value_fn(self.coordinator.data)
+        value = str(param.value).lower()
         if value not in self._attr_options:
             _LOGGER.warning(
                 "%s: unexpected value %r from API (known options: %s)",
@@ -106,6 +128,10 @@ class HargassnerSelectEntity(CoordinatorEntity[HargassnerCoordinator], SelectEnt
         return value
 
     async def async_select_option(self, option: str) -> None:
-        """Send the selected option to the boiler and refresh state."""
-        await self.entity_description.set_option_fn(self.coordinator.client, option)
+        param = self._param
+        if not param or not param.resource:
+            raise HomeAssistantError(
+                f"{self.entity_id}: parameter is not currently writable."
+            )
+        await self.coordinator.client.async_patch_resource(param.resource, option.upper())
         await self.coordinator.async_request_refresh()

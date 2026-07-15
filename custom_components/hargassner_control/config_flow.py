@@ -2,18 +2,8 @@
 Config flow for the Hargassner Connect Home Assistant integration.
 
 User-facing inputs:  email address + password only.
-Auto-discovered:     OAuth client_id + client_secret (from /js/app.js),
+Auto-discovered:     OAuth client credentials (built in, self-healing) and the
                      installation ID.
-
-Flow steps
-----------
-user                 → email + password form
-select_installation  → only shown when account has >1 installation
-(entry created)
-
-Options flow
-------------
-Allows re-entering credentials after setup (e.g. password change).
 """
 from __future__ import annotations
 
@@ -84,7 +74,7 @@ class HargassnerConfigFlow(ConfigFlow, domain=DOMAIN):
                 await client.async_validate_credentials()
                 installations = await client.async_discover_installation_id()
             except HargassnerSecretError:
-                _LOGGER.exception("Failed to extract OAuth credentials from app.js")
+                _LOGGER.exception("Failed to obtain OAuth client credentials")
                 errors["base"] = "secret_extraction_failed"
             except HargassnerAuthError:
                 errors["base"] = "invalid_auth"
@@ -135,18 +125,12 @@ class HargassnerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     def _create_entry(self, installation_id: str, installation_name: str) -> ConfigFlowResult:
-        """
-        Create the config entry.
-
-        Stored:      username, password, installation_id.
-        NOT stored:  client_id, client_secret — re-extracted from /js/app.js
-                     on every HA startup.  Self-heals on rotation.
-        """
+        """Create the config entry (stores username, password, installation_id)."""
         return self.async_create_entry(
             title=f"Hargassner — {installation_name}",
             data={
-                CONF_USERNAME:        self._username,
-                CONF_PASSWORD:        self._password,
+                CONF_USERNAME: self._username,
+                CONF_PASSWORD: self._password,
                 CONF_INSTALLATION_ID: installation_id,
             },
         )

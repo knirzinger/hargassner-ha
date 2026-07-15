@@ -1,14 +1,14 @@
 """
 Number entities for the Hargassner Connect integration.
 
-Each NumberEntity maps to one writable float parameter on the boiler.
-Reads come from the shared coordinator (WidgetSnapshot).
-Writes go directly to the API then trigger a coordinator refresh.
+Entities are created dynamically: a control is only added when the matching
+writable parameter is actually present in the live /widgets payload. Range and
+step come from the API itself. Writes go to the parameter's own ``resource`` URL.
+This makes the integration adapt automatically to different boiler models.
 """
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,178 +20,216 @@ from homeassistant.components.number import (
 )
 from homeassistant.const import UnitOfMass, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import HargassnerCoordinator
-from .api_client import WidgetSnapshot
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    WIDGET_BOILER,
+    WIDGET_HEATER,
+    WIDGET_HEATING_CIRCUIT,
+)
+from .coordinator import HargassnerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
 class HargassnerNumberDescription(NumberEntityDescription):
-    """Extends NumberEntityDescription with Hargassner-specific fields."""
+    """Number description bound to a widget parameter."""
 
-    value_fn: Callable[[WidgetSnapshot], float | None]
-    set_value_fn: Callable[[Any, float], Any]  # (client, value) -> coroutine
+    widget_prefix: str
+    param_key: str
+    default_min: float = 0.0
+    default_max: float = 100.0
+    default_step: float = 1.0
 
 
 NUMBER_DESCRIPTIONS: tuple[HargassnerNumberDescription, ...] = (
+    # --- Domestic hot water (NEW in 0.1.2) ---
+    HargassnerNumberDescription(
+        key="hot_water_temperature",
+        translation_key="hot_water_temperature",
+        widget_prefix=WIDGET_BOILER,
+        param_key="boiler_temperature_target",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        default_min=10.0, default_max=84.0, default_step=1.0,
+        mode=NumberMode.BOX,
+    ),
+    # --- Pellet stock (moved to HEATER widget, real max used) ---
+    HargassnerNumberDescription(
+        key="pellet_stock",
+        translation_key="pellet_stock",
+        widget_prefix=WIDGET_HEATER,
+        param_key="fuel_stock",
+        native_unit_of_measurement=UnitOfMass.KILOGRAMS,
+        default_min=0.0, default_max=7874.0, default_step=1.0,
+        mode=NumberMode.BOX,
+        icon="mdi:sack",
+    ),
+    # --- Heating circuit: everyday correction (±3) ---
     HargassnerNumberDescription(
         key="room_temperature_correction",
         translation_key="room_temperature_correction",
-        name="Room Temperature Correction",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="room_temperature_correction",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=-3.0,
-        native_max_value=3.0,
-        native_step=0.5,
+        default_min=-3.0, default_max=3.0, default_step=0.5,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.room_temp_correction,
-        set_value_fn=lambda client, v: client.async_set_room_temp_correction(v),
     ),
+    # --- Advanced heating-circuit setpoints (only appear on devices that expose
+    #     them, e.g. Nano.2; absent on Classic — created dynamically) ---
     HargassnerNumberDescription(
         key="room_temperature_heating",
         translation_key="room_temperature_heating",
-        name="Room Temperature (Heating)",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="room_temperature_heating",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=10.0,
-        native_max_value=30.0,
-        native_step=0.5,
+        default_min=10.0, default_max=30.0, default_step=0.5,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.room_temp_heating,
-        set_value_fn=lambda client, v: client.async_set_room_temp_heating(v),
     ),
     HargassnerNumberDescription(
         key="room_temperature_reduction",
         translation_key="room_temperature_reduction",
-        name="Room Temperature (Reduction)",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="room_temperature_reduction",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=10.0,
-        native_max_value=30.0,
-        native_step=0.5,
+        default_min=10.0, default_max=30.0, default_step=0.5,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.room_temp_reduction,
-        set_value_fn=lambda client, v: client.async_set_room_temp_reduction(v),
     ),
     HargassnerNumberDescription(
         key="steepness",
         translation_key="steepness",
-        name="Heating Curve Steepness",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="steepness",
         native_unit_of_measurement=None,
-        native_min_value=0.2,
-        native_max_value=3.5,
-        native_step=0.05,
-        mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.steepness,
-        set_value_fn=lambda client, v: client.async_set_steepness(v),
+        default_min=0.2, default_max=3.5, default_step=0.05,
+        mode=NumberMode.SLIDER,
+        icon="mdi:slope-uphill",
     ),
     HargassnerNumberDescription(
         key="deactivation_limit_heating",
         translation_key="deactivation_limit_heating",
-        name="Heating Off Temp",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="deactivation_limit_heating",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=-10.0,
-        native_max_value=30.0,
-        native_step=1.0,
+        default_min=-10.0, default_max=50.0, default_step=1.0,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.deactivation_limit_heating,
-        set_value_fn=lambda client, v: client.async_set_deactivation_limit_heating(v),
     ),
     HargassnerNumberDescription(
         key="deactivation_limit_reduction_day",
         translation_key="deactivation_limit_reduction_day",
-        name="Day Setback Off Temp",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="deactivation_limit_reduction_day",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=-10.0,
-        native_max_value=30.0,
-        native_step=1.0,
+        default_min=-40.0, default_max=50.0, default_step=1.0,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.deactivation_limit_reduction_day,
-        set_value_fn=lambda client, v: client.async_set_deactivation_limit_reduction_day(v),
     ),
     HargassnerNumberDescription(
         key="deactivation_limit_reduction_night",
         translation_key="deactivation_limit_reduction_night",
-        name="Night Setback Off Temp",
+        widget_prefix=WIDGET_HEATING_CIRCUIT,
+        param_key="deactivation_limit_reduction_night",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
-        native_min_value=-10.0,
-        native_max_value=30.0,
-        native_step=1.0,
+        default_min=-40.0, default_max=50.0, default_step=1.0,
         mode=NumberMode.BOX,
-        value_fn=lambda s: s.heating_circuit.deactivation_limit_reduction_night,
-        set_value_fn=lambda client, v: client.async_set_deactivation_limit_reduction_night(v),
-    ),
-    HargassnerNumberDescription(
-        key="pellet_stock",
-        translation_key="pellet_stock",
-        name="Pellet Stock",
-        native_unit_of_measurement=UnitOfMass.KILOGRAMS,
-        native_min_value=0.0,
-        native_max_value=5000.0,
-        native_step=10.0,
-        mode=NumberMode.BOX,
-        value_fn=lambda s: s.pellet_stock_kg,
-        set_value_fn=lambda client, v: client.async_set_pellet_stock(v),
     ),
 )
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: Any,
-    async_add_entities: AddEntitiesCallback,
+    hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up Hargassner number entities from a config entry."""
+    """Create number entities for parameters present in the payload."""
     coordinator: HargassnerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        HargassnerNumberEntity(coordinator, description)
-        for description in NUMBER_DESCRIPTIONS
-    )
+    data = coordinator.data
+    if data is None:
+        return
+    entities = [
+        HargassnerNumberEntity(coordinator, desc)
+        for desc in NUMBER_DESCRIPTIONS
+        if data.param(desc.widget_prefix, desc.param_key) is not None
+    ]
+    async_add_entities(entities)
 
 
 class HargassnerNumberEntity(CoordinatorEntity[HargassnerCoordinator], NumberEntity):
     """A controllable numeric parameter on the Hargassner boiler."""
 
     _attr_has_entity_name = True
+    entity_description: HargassnerNumberDescription
 
     def __init__(
-        self,
-        coordinator: HargassnerCoordinator,
-        description: HargassnerNumberDescription,
+        self, coordinator: HargassnerCoordinator, description: HargassnerNumberDescription
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{description.key}"
         self._attr_device_info = _device_info(coordinator)
 
+        param = self._param
+        self._attr_native_min_value = (
+            float(param.minimum) if param and param.minimum is not None
+            else description.default_min
+        )
+        self._attr_native_max_value = (
+            float(param.maximum) if param and param.maximum is not None
+            else description.default_max
+        )
+        self._attr_native_step = (
+            float(param.step) if param and param.step is not None
+            else description.default_step
+        )
+
+    @property
+    def _param(self):
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return data.param(self.entity_description.widget_prefix, self.entity_description.param_key)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._param is not None
+
     @property
     def native_value(self) -> float | None:
-        """Return the current value from the coordinator snapshot."""
-        if self.coordinator.data is None:
-            return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        param = self._param
+        if param and param.value is not None:
+            try:
+                return float(param.value)
+            except (TypeError, ValueError):
+                return None
+        return None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Send the new value to the boiler and refresh state."""
-        await self.entity_description.set_value_fn(self.coordinator.client, value)
+        param = self._param
+        if not param or not param.resource:
+            raise HomeAssistantError(
+                f"{self.entity_id}: parameter is not currently writable."
+            )
+        await self.coordinator.client.async_patch_resource(param.resource, value)
         await self.coordinator.async_request_refresh()
 
 
-def _device_info(coordinator: HargassnerCoordinator) -> dict:
-    """Return the device registry info shared by all Hargassner entities."""
-    from homeassistant.helpers.device_registry import DeviceInfo
+def _device_info(coordinator: HargassnerCoordinator) -> DeviceInfo:
+    """Device registry info shared by all Hargassner entities."""
+    data = coordinator.data
+    name = data.device_name if data else "Hargassner"
+    model = data.device_model if data else "Pellematic"
     return DeviceInfo(
         identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
-        name="Hargassner Pellematic",
+        name=name,
         manufacturer="Hargassner",
-        model="Pellematic",
+        model=model,
         configuration_url="https://web.hargassner.at",
     )

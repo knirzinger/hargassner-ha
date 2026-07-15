@@ -1,7 +1,7 @@
 """
 DataUpdateCoordinator for the Hargassner Connect integration.
 
-Single GET /widgets call every 15 minutes keeps all entities current.
+A single GET /widgets call every 15 minutes keeps all entities current.
 All entities share this one coordinator — no per-entity polling.
 """
 from __future__ import annotations
@@ -17,31 +17,20 @@ from .api_client import (
     HargassnerApiClient,
     HargassnerAuthError,
     HargassnerConnectionError,
+    HargassnerData,
     HargassnerError,
-    WidgetSnapshot,
 )
 from .const import DOMAIN, SCAN_INTERVAL_MINUTES
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class HargassnerCoordinator(DataUpdateCoordinator[WidgetSnapshot]):
-    """
-    Coordinator that polls GET /widgets on a fixed schedule.
-
-    All sensor, number, select, button, and binary_sensor entities subscribe
-    to this coordinator and read from ``coordinator.data`` (a WidgetSnapshot).
-    Write operations (PATCH / POST) call the api_client directly and then
-    call ``async_request_refresh()`` to sync state back promptly.
-    """
+class HargassnerCoordinator(DataUpdateCoordinator[HargassnerData]):
+    """Polls GET /widgets on a fixed schedule and shares the parsed result."""
 
     config_entry: ConfigEntry
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        client: HargassnerApiClient,
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, client: HargassnerApiClient) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -50,33 +39,23 @@ class HargassnerCoordinator(DataUpdateCoordinator[WidgetSnapshot]):
         )
         self.client = client
 
-    async def _async_update_data(self) -> WidgetSnapshot:
-        """
-        Fetch a fresh WidgetSnapshot from the API.
-
-        Called automatically by the coordinator on the poll interval, and
-        manually via ``async_request_refresh()`` after any write operation.
-
-        Raises ``UpdateFailed`` on any error so HA marks entities unavailable
-        rather than showing stale data silently.
-        """
+    async def _async_update_data(self) -> HargassnerData:
+        """Fetch fresh data; raise UpdateFailed so entities go unavailable on error."""
         try:
-            snapshot = await self.client.async_get_widgets()
+            data = await self.client.async_get_data()
         except HargassnerAuthError as exc:
             raise UpdateFailed(
                 f"Authentication error — check your Hargassner Connect credentials: {exc}"
             ) from exc
         except HargassnerConnectionError as exc:
-            raise UpdateFailed(
-                f"Cannot reach the Hargassner Connect portal: {exc}"
-            ) from exc
+            raise UpdateFailed(f"Cannot reach the Hargassner Connect portal: {exc}") from exc
         except HargassnerError as exc:
             raise UpdateFailed(f"Hargassner API error: {exc}") from exc
 
         _LOGGER.debug(
-            "Poll OK — boiler %s°C, mode %s, pellets %s kg",
-            snapshot.boiler.temperature,
-            snapshot.heating_circuit.mode,
-            snapshot.pellet_stock_kg,
+            "Poll OK — %d widget(s), online=%s, pellets=%s kg",
+            len(data.widgets),
+            data.online,
+            data.value("HEATER", "fuel_stock"),
         )
-        return snapshot
+        return data

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Hargassner Control",
-        "description": "Geben Sie Ihre Hargassner Connect Zugangsdaten ein. Die OAuth-Konfiguration und die Installations-ID werden automatisch erkannt.",
+        "description": "Geben Sie Ihre Hargassner Connect Zugangsdaten ein. Die Installation wird automatisch erkannt.",
         "data": {"username": "E-Mail-Adresse", "password": "Passwort"}
       },
       "select_installation": {
@@ -15,7 +15,7 @@
     "error": {
       "cannot_connect": "Das Hargassner Connect Portal ist nicht erreichbar. Bitte Internetverbindung prüfen.",
       "invalid_auth": "Ungültige E-Mail-Adresse oder Passwort.",
-      "secret_extraction_failed": "OAuth-Konfiguration konnte nicht vom Portal gelesen werden. Bitte ein GitHub-Issue öffnen.",
+      "secret_extraction_failed": "OAuth-Konfiguration konnte nicht vom Hargassner Connect Portal gelesen werden. Bitte ein GitHub-Issue öffnen.",
       "unknown": "Unerwarteter Fehler. Bitte Home Assistant Logs prüfen."
     },
     "abort": {"already_configured": "Dieses Hargassner-Konto ist bereits konfiguriert."}
@@ -47,29 +47,42 @@
       "deactivation_limit_heating": {"name": "Heizen Aus Temp"},
       "deactivation_limit_reduction_day": {"name": "Tagabsenkung Aus Temp"},
       "deactivation_limit_reduction_night": {"name": "Nachtabsenkung Aus Temp"},
-      "pellet_stock": {"name": "Pellets Lagerstand"}
+      "pellet_stock": {"name": "Pellets Lagerstand"},
+      "hot_water_temperature": {"name": "Warmwasser Temperatur"}
     },
     "select": {
       "heating_mode": {
         "name": "Heizkreis Modus",
         "state": {
-          "MODE_AUTOMATIC": "Automatik",
-          "MODE_HEATING": "Heizen",
-          "MODE_REDUCTION": "Absenkung",
-          "MODE_OFF": "Aus"
+          "mode_off": "Aus",
+          "mode_automatic": "Automatik",
+          "mode_heating": "Heizen",
+          "mode_reduction": "Absenkung",
+          "mode_bridge_heating": "Einmal Heizen",
+          "mode_bridge_reduction": "Einmal Absenkung"
         }
       },
       "solar_mode": {
         "name": "Solar Modus",
-        "state": {"MODE_ON": "Ein", "MODE_OFF": "Aus"}
+        "state": {"mode_on": "Ein", "mode_off": "Aus"}
+      },
+      "heater_program": {
+        "name": "Kessel Programm",
+        "state": {
+          "program_off": "Aus",
+          "program_boiler": "Kessel",
+          "program_automatic": "Automatik",
+          "program_stop_firing": "Ausbrennen"
+        }
       },
       "bathroom_heating": {
         "name": "Badewanne / Einmalladung",
-        "state": {"MODE_ON": "Ein", "MODE_OFF": "Aus"}
+        "state": {"mode_on": "Ein", "mode_off": "Aus"}
       }
     },
     "button": {
-      "force_charge": {"name": "Warmwasser Sofort Laden"}
+      "force_charge": {"name": "Warmwasser Sofort Laden"},
+      "confirm_events": {"name": "Ereignisse quittieren"}
     }
   }
 }

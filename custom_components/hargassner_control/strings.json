@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Hargassner Control",
-        "description": "Enter your Hargassner Connect account credentials. The OAuth configuration and installation ID are discovered automatically.",
+        "description": "Enter your Hargassner Connect account credentials. The installation is discovered automatically.",
         "data": {
           "username": "Email address",
           "password": "Password"
@@ -20,7 +20,7 @@
     "error": {
       "cannot_connect": "Unable to reach the Hargassner Connect portal. Check your internet connection and try again.",
       "invalid_auth": "Invalid email or password. Please check your Hargassner Connect credentials.",
-      "secret_extraction_failed": "Could not read the OAuth configuration from /js/app.js. The JS structure may have changed — please open a GitHub issue.",
+      "secret_extraction_failed": "Could not read the OAuth configuration from the Hargassner Connect portal. The portal may have changed — please open a GitHub issue.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details."
     },
     "abort": {
@@ -41,7 +41,7 @@
     "error": {
       "cannot_connect": "Unable to reach the Hargassner Connect portal.",
       "invalid_auth": "Invalid email or password.",
-      "secret_extraction_failed": "Could not read the OAuth configuration from /js/app.js.",
+      "secret_extraction_failed": "Could not read the OAuth configuration from the Hargassner Connect portal.",
       "unknown": "An unexpected error occurred."
     }
   },
@@ -58,21 +58,33 @@
       "deactivation_limit_heating": {"name": "Heating Off Temp"},
       "deactivation_limit_reduction_day": {"name": "Day Setback Off Temp"},
       "deactivation_limit_reduction_night": {"name": "Night Setback Off Temp"},
-      "pellet_stock": {"name": "Pellet Stock"}
+      "pellet_stock": {"name": "Pellet Stock"},
+      "hot_water_temperature": {"name": "Hot Water Temperature"}
     },
     "select": {
       "heating_mode": {
         "name": "Heating Mode",
         "state": {
+          "mode_off": "Off",
           "mode_automatic": "Automatic",
           "mode_heating": "Heating",
           "mode_reduction": "Reduction",
-          "mode_off": "Off"
+          "mode_bridge_heating": "One-time Heating",
+          "mode_bridge_reduction": "One-time Reduction"
         }
       },
       "solar_mode": {
         "name": "Solar Mode",
         "state": {"mode_on": "On", "mode_off": "Off"}
+      },
+      "heater_program": {
+        "name": "Heater Program",
+        "state": {
+          "program_off": "Off",
+          "program_boiler": "Boiler",
+          "program_automatic": "Automatic",
+          "program_stop_firing": "Stop Firing"
+        }
       },
       "bathroom_heating": {
         "name": "Bathroom Heating",
@@ -80,7 +92,8 @@
       }
     },
     "button": {
-      "force_charge": {"name": "Force Hot Water Charge"}
+      "force_charge": {"name": "Force Hot Water Charge"},
+      "confirm_events": {"name": "Acknowledge Events"}
     }
   }
 }

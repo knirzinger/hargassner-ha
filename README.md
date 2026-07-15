@@ -1,7 +1,6 @@
 # Hargassner Control — Home Assistant Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue)](https://www.home-assistant.io/)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration) [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue)](https://www.home-assistant.io/)
 
 Bidirectional **control** of Hargassner pellet boiler systems via the [Hargassner Connect](https://web.hargassner.at) cloud portal.
 
@@ -11,7 +10,7 @@ Bidirectional **control** of Hargassner pellet boiler systems via the [Hargassne
 
 > **This integration is CONTROL ONLY — it does not provide boiler sensor data.**
 
-For the full picture — 228 live sensors including temperatures, O₂ levels, pump states, buffer data, and boiler diagnostics — install the **BauerGroup IP-HargassnerIntegration** alongside this one:
+For the full picture — live sensors including temperatures, O₂ levels, pump states, buffer data, and boiler diagnostics — install the **BauerGroup IP-HargassnerIntegration** alongside this one:
 
 🔗 **[github.com/bauer-group/IP-HargassnerIntegration](https://github.com/bauer-group/IP-HargassnerIntegration)**
 
@@ -21,27 +20,30 @@ BauerGroup connects directly to the boiler via local telnet and provides the rea
 
 - ❌ Does not provide boiler temperature, O₂, or exhaust sensors
 - ❌ Does not provide flow / return temperature readings (Vorlauf / Rücklauf)
-- ❌ Does not provide pump status or boiler operational state
-- ❌ Does not provide buffer or domestic hot water temperature sensors
+- ❌ Does not provide pump status as sensors
 - ❌ Does not connect to the boiler directly — all control goes via the cloud portal
 
 ### What this integration DOES do
 
-- ✅ Sets the heating circuit mode (Automatic / Heating / Reduction / Off)
-- ✅ Adjusts all heating parameters (room temps, steepness, deactivation limits)
-- ✅ Controls solar mode and bathroom heating (Badewanne)
-- ✅ Triggers force hot-water charge
+- ✅ Sets the heating circuit mode (Automatic / Heating / Reduction / Off, plus one-time boost/setback)
+- ✅ Adjusts the room temperature correction
+- ✅ Sets the domestic hot-water target temperature
+- ✅ Selects the heater operating program
+- ✅ Controls solar mode
+- ✅ Triggers a force hot-water charge
 - ✅ Updates pellet stock level
+- ✅ Acknowledges pending events / warnings
 - ✅ Shows last sync timestamp and connection status
 - ✅ Supports English and German (matches Hargassner API terminology)
+- ✅ Adapts automatically to your boiler — controls appear only when your device exposes them
 
 ---
 
 ## Features
 
-- **Control-only** — 13 control entities (number, select, button) + 2 status sensors
-- **Auto-discovery** — OAuth credentials extracted from live JS bundle; installation ID auto-detected
-- **Self-healing** — re-extracts credentials on startup; auto-retries on 401
+- **Control-focused** — writable numbers, selects and buttons, plus two status sensors
+- **Adaptive** — entities are created dynamically from your boiler's live capabilities; range/step/options come straight from the API
+- **Resilient auth** — public OAuth client credentials are built in, with an automatic self-healing re-extraction fallback if Hargassner ever rotate them
 - **Bilingual** — full EN/DE translations using exact Hargassner portal terminology
 - **Zero config** — enter only your email and password
 
@@ -80,45 +82,56 @@ BauerGroup connects directly to the boiler via local telnet and provides the rea
 3. Enter your Hargassner Connect **email** and **password**
 4. The integration auto-discovers your installation and connects
 
-> **Credentials note:** Only your email and password are stored. The OAuth client credentials are fetched from the Hargassner Connect web app on every startup — never hardcoded, never stored.
+> **Credentials note:** Only your email and password are stored. The OAuth *client* credentials used by the ROPC grant are public application identifiers built into the integration (and self-heal from the portal if rotated) — no user secret is ever stored.
 
 ---
 
 ## Entities
 
-### Sensors (read-only, status only)
+Entities are created **dynamically** based on what your specific boiler exposes, so
+the exact set varies by model. The tables below list everything the integration
+can create.
 
-| Entity | Description |
-|---|---|
-| `sensor.last_sync` | Timestamp of last successful data refresh |
-| `sensor.connection` | Online / Offline connection status |
+### Sensors (status only)
+
+| Entity              | Description                               |
+| ------------------- | ----------------------------------------- |
+| `sensor.last_sync`  | Timestamp of last successful data refresh |
+| `sensor.connection` | Online / Offline connection status        |
 
 ### Numbers (read + write)
 
-| Entity | EN Name | DE Name | Range | Step |
-|---|---|---|---|---|
-| `number.room_temperature_correction` | Temperature Correction | Temperatur Korrektur | −3 … +3 °C | 0.5 |
-| `number.room_temperature_heating` | Room Temperature (Heating) | Raumtemperatur Heizen | 10 … 30 °C | 0.5 |
-| `number.room_temperature_reduction` | Room Temperature (Reduction) | Raumtemperatur Absenkung | 10 … 30 °C | 0.5 |
-| `number.steepness` | Heating Curve Steepness | Heizkurve Steilheit | 0.2 … 3.5 | 0.05 |
-| `number.deactivation_limit_heating` | Heating Off Temp | Heizen Aus Temp | −10 … 30 °C | 1.0 |
-| `number.deactivation_limit_reduction_day` | Day Setback Off Temp | Tagabsenkung Aus Temp | −10 … 30 °C | 1.0 |
-| `number.deactivation_limit_reduction_night` | Night Setback Off Temp | Nachtabsenkung Aus Temp | −10 … 30 °C | 1.0 |
-| `number.pellet_stock` | Pellet Stock | Pellets Lagerstand | 0 … 5000 kg | 10 |
+| Entity                                      | Description                     | Range / step from API |
+| ------------------------------------------- | ------------------------------- | --------------------- |
+| `number.hot_water_temperature`              | Domestic hot-water target       | e.g. 10 … 84 °C       |
+| `number.pellet_stock`                       | Pellet stock                    | e.g. 0 … 7874 kg      |
+| `number.room_temperature_correction`        | Room temperature correction     | e.g. −3 … +3 °C       |
+| `number.room_temperature_heating`*          | Room temperature (heating)      | device-dependent      |
+| `number.room_temperature_reduction`*        | Room temperature (reduction)    | device-dependent      |
+| `number.steepness`*                         | Heating-curve steepness         | device-dependent      |
+| `number.deactivation_limit_heating`*        | Heating off temperature         | device-dependent      |
+| `number.deactivation_limit_reduction_day`*  | Day setback off temperature     | device-dependent      |
+| `number.deactivation_limit_reduction_night`*| Night setback off temperature   | device-dependent      |
+
+\* Advanced setpoints — only created on boilers that expose them (e.g. Nano.2).
 
 ### Selects (read + write)
 
-| Entity | EN Name | DE Name | Options |
-|---|---|---|---|
-| `select.heating_mode` | Heating Mode | Heizkreis Modus | Automatic / Heating / Reduction / Off |
-| `select.solar_mode` | Solar Mode | Solar Modus | On / Off |
-| `select.bathroom_heating` | Bathroom Heating | Badewanne / Einmalladung | On / Off |
+| Entity                    | Options (from API)                                                  |
+| ------------------------- | ------------------------------------------------------------------ |
+| `select.heating_mode`     | Automatic / Heating / Reduction / Off / One-time Heating / One-time Reduction |
+| `select.solar_mode`       | On / Off                                                            |
+| `select.heater_program`   | Off / Boiler / Automatic / Stop firing                             |
+| `select.bathroom_heating`*| On / Off                                                           |
+
+\* Only created on boilers that expose it.
 
 ### Buttons (action)
 
-| Entity | EN Name | DE Name |
-|---|---|---|
-| `button.force_charge` | Force Hot Water Charge | Warmwasser Sofort Laden |
+| Entity                   | Description                                  |
+| ------------------------ | -------------------------------------------- |
+| `button.force_charge`    | Immediate hot-water charge                   |
+| `button.confirm_events`  | Acknowledge all pending events / warnings    |
 
 ---
 
@@ -130,18 +143,23 @@ All communication is outbound HTTPS from your HA host to `web.hargassner.at`. No
 Home Assistant
   └─ HargassnerCoordinator (poll every 15 min)
        └─ HargassnerApiClient
-            ├─ GET  /js/app.js                              → extract client_id + client_secret
-            ├─ POST /oauth/token                            → ROPC Bearer token
-            ├─ GET  /api/installations/{id}/widgets         → sync current settings
-            ├─ PATCH /api/installations/{id}/widgets/…      → write parameter changes
-            └─ POST  /api/installations/{id}/widgets/…      → trigger actions
+            ├─ POST /oauth/token                              → ROPC Bearer token (built-in public client creds)
+            ├─ GET  /api/installations                        → discover installation(s)
+            ├─ GET  /api/installations/{id}/widgets           → read current state + capabilities
+            ├─ PATCH <parameter resource>                     → write a parameter change
+            └─ POST  <action resource>                        → trigger an action
 ```
+
+Each writable parameter in the `/widgets` response carries its own `resource` URL,
+plus range/step or option metadata. The integration builds entities directly from
+that, so it adapts to different boiler models without code changes.
 
 ---
 
 ## Automation Examples
 
-**Solar surplus — enable solar mode when inverter produces excess:**
+**Solar surplus — enable solar mode when the inverter produces excess:**
+
 ```yaml
 automation:
   - alias: "Hargassner solar on surplus"
@@ -154,10 +172,11 @@ automation:
         target:
           entity_id: select.hargassner_control_solar_mode
         data:
-          option: MODE_ON
+          option: "on"
 ```
 
-**Badewanne (hot water boost):**
+**Force a hot-water charge:**
+
 ```yaml
 automation:
   - alias: "Hargassner force charge"
@@ -171,25 +190,19 @@ automation:
           entity_id: button.hargassner_control_force_charge
 ```
 
-**Guard room thermostats against summer mode:**
-```yaml
-condition:
-  - condition: not
-    conditions:
-      - condition: state
-        entity_id: select.hargassner_control_heating_mode
-        state: MODE_OFF
-```
-
 ---
 
 ## Troubleshooting
 
-**`secret_extraction_failed` during setup** — The portal JS structure changed. [Open a GitHub issue](https://github.com/knirzinger/hargassner-ha/issues).
+**`invalid_auth` during setup** — Check your Hargassner Connect email and password.
 
-**Entities show `unavailable`** — Check **Settings → System → Logs**, filter for `hargassner_control`. Usually a network issue or portal maintenance. Connection sensor will show `offline`.
+**`cannot_connect` during setup** — Your HA host cannot reach `web.hargassner.at`. Check outbound internet access. The Home Assistant log now records the actual HTTP status.
 
-**Values bounce back after write** — The portal rejected the value (out of range). Check HA logs for HTTP status code.
+**`secret_extraction_failed`** — The built-in client credentials were rejected and the portal structure changed so they could not be re-extracted. [Open a GitHub issue](https://github.com/knirzinger/hargassner-ha/issues).
+
+**Entities show `unavailable`** — Check **Settings → System → Logs**, filter for `hargassner_control`. Usually a network issue or portal maintenance; the connection sensor will show `offline`.
+
+**Some controls are missing** — That is expected: the integration only creates controls your specific boiler model exposes.
 
 ---
 
@@ -197,21 +210,25 @@ condition:
 
 - Heating circuit 1 only — multi-circuit installations (HK2, HK3) not yet supported
 - All control via cloud — no local LAN API on the boiler itself
-- ROPC OAuth grant — a legacy flow; may require updates if Hargassner migrate to auth code flow
+- Advanced heating-curve configuration (steepness/niveau) on newer portals lives behind a configurator wizard and is not exposed here
 
 ---
 
-## API Reference
+## Credits & Acknowledgements
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/js/app.js` | Extract OAuth client_id + client_secret |
-| `POST` | `/oauth/token` | Obtain Bearer token (ROPC) |
-| `GET` | `/api/installations/{id}/widgets` | Read all controllable settings |
-| `PATCH` | `/api/installations/{id}/widgets/heating-circuits/1/parameters/{param}` | Write heating circuit parameter |
-| `PATCH` | `/api/installations/{id}/widgets/heater/parameters/fuel-stock` | Update pellet stock |
-| `PATCH` | `/api/installations/{id}/widgets/buffer/default/parameters/solar-mode-active` | Set solar mode |
-| `POST` | `/api/installations/{id}/widgets/boilers/1/actions/force-charging` | Force hot water charge |
+- **[@lithium73fr](https://github.com/lithium73fr)** and the
+  [lithium73fr/hargassner-ha](https://github.com/lithium73fr/hargassner-ha)
+  integration — an invaluable reference for the current cloud API shape, the
+  dynamic-entity approach, and the authentication/branding details. Thank you.
+- **[BauerGroup](https://github.com/bauer-group/IP-HargassnerIntegration)** — the
+  local telnet sensor integration this project is designed to complement.
+- Everyone who reported issues and contributed feedback:
+  [@karlspace](https://github.com/karlspace),
+  [@vanouzbek](https://github.com/vanouzbek) (French translation),
+  [@Offerel](https://github.com/Offerel),
+  [@abarwirsch](https://github.com/abarwirsch), and
+  [@eltron02](https://github.com/eltron02). Thank you all — the reports and
+  comments directly shaped this release.
 
 ---
 

@@ -1,20 +1,18 @@
 """
-Hargassner Connect – async API client for Home Assistant.
+Hargassner Connect — async API client for Home Assistant.
 
 Reverse-engineered from web.hargassner.at network traffic.
 
 Authentication
 --------------
-OAuth 2.0 ROPC flow.  Both ``client_id`` and ``client_secret`` are extracted
-at runtime from a single, stable JS file:
+OAuth 2.0 ROPC ("password") grant. The OAuth *client* credentials
+(``client_id`` / ``client_secret``) are PUBLIC application identifiers shipped in
+the Connect web/app clients — not user secrets. They are hardcoded in
+``const.py`` (see the note there). If a hardcoded value is ever rejected, the
+client falls back to re-extracting the values from the live JS bundle, which is
+now a hashed Vite build discovered via ``/build/manifest.json``.
 
-    https://web.hargassner.at/js/app.js
-
-The file has no cache-busting hash, making it a reliable fetch target.
-The regex  o=\"(\d+)\",n=\"([^\"]+)\"  reliably captures both values.
-
-No credentials are hardcoded.  No user input beyond email + password.
-Self-heals automatically if Hargassner rotate the values.
+The user only ever provides email + password.
 """
 from __future__ import annotations
 
@@ -23,55 +21,33 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any
 
 import aiohttp
 
+from .const import (
+    API_URL,
+    APP_BRANDING,
+    DEFAULT_CLIENT_ID,
+    DEFAULT_CLIENT_SECRET,
+    MANIFEST_URL,
+    PORTAL_URL,
+    TOKEN_URL,
+    USER_AGENT,
+    WIDGET_HEATER,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+TOKEN_TTL_SECONDS = 1800  # 30 min safety margin (real TTL ~3600 s)
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=25)
 
-PORTAL_URL  = "https://web.hargassner.at"
-TOKEN_URL   = f"{PORTAL_URL}/oauth/token"
-API_BASE    = f"{PORTAL_URL}/api/installations"
-APP_JS_URL  = f"{PORTAL_URL}/js/app.js"
-
-TOKEN_TTL_SECONDS = 1800   # 30 min safety margin (real TTL ~3600 s)
-REQUEST_TIMEOUT   = aiohttp.ClientTimeout(total=20)
-
-# Extracts client_id (group 1) and client_secret (group 2) from app.js.
-# Pattern confirmed against the live bundle: o="1",n="aSYsAYj7..."
-# NOTE: client_secret is a PUBLIC APPLICATION IDENTIFIER embedded in the
-# Hargassner Connect web app — it is NOT a user credential or secret key.
-# It is extracted dynamically at runtime so that rotations are handled
-# automatically without any user action or integration update.
-_OAUTH_CREDS_RE = re.compile(r'o=\"(\d+)\",n=\"([^\"]+)\"')
-
-
-# ---------------------------------------------------------------------------
-# Domain enums  (values are lowercase — used as HA translation keys)
-# The API itself uses uppercase MODE_* strings; conversion happens in
-# _parse_widgets (API → HA) and async_set_* (HA → API).
-# ---------------------------------------------------------------------------
-
-class HeatingMode(StrEnum):
-    AUTOMATIC = "mode_automatic"
-    HEATING   = "mode_heating"
-    REDUCTION = "mode_reduction"
-    OFF       = "mode_off"
-
-
-class SolarMode(StrEnum):
-    ON  = "mode_on"
-    OFF = "mode_off"
-
-
-class BathroomHeating(StrEnum):
-    ON  = "mode_on"
-    OFF = "mode_off"
+# Fallback only. Extracts the OAuth client_id/secret from the minified JS bundle
+# by anchoring on the call site (``client_id:<var>,client_secret:<var>``) and
+# then resolving each variable's string assignment — robust against the minified
+# variable names changing between deploys.
+_ANCHOR_RE = re.compile(r"client_id:(\w+),client_secret:(\w+)")
+_LEGACY_APP_JS = f"{PORTAL_URL}/js/app.js"
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +59,7 @@ class HargassnerError(Exception):
 
 
 class HargassnerAuthError(HargassnerError):
-    """Raised when authentication fails (bad credentials or revoked token)."""
+    """Raised when authentication fails (bad email/password or revoked token)."""
 
 
 class HargassnerConnectionError(HargassnerError):
@@ -99,59 +75,84 @@ class HargassnerApiError(HargassnerError):
 
 
 class HargassnerSecretError(HargassnerError):
-    """
-    Raised when client_id/client_secret cannot be extracted from app.js.
-
-    This means the JS structure has changed.  Open a GitHub issue so the
-    regex pattern can be updated.
-    """
+    """Raised when client credentials cannot be extracted from the JS bundle."""
 
 
 # ---------------------------------------------------------------------------
-# Data classes (parsed from GET /widgets)
+# Parsed data model (generic — mirrors the live /widgets payload)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class HeatingCircuitData:
-    mode: str                                   = "unknown"
-    room_temp_correction: float                 = 0.0
-    room_temp_heating: float                    = 20.0
-    room_temp_reduction: float                  = 18.0
-    steepness: float                            = 1.5
-    deactivation_limit_heating: float           = 15.0
-    deactivation_limit_reduction_day: float     = 15.0
-    deactivation_limit_reduction_night: float   = 15.0
-    bathroom_heating: str                       = "mode_off"
+class ParamInfo:
+    """A single writable parameter from a widget's ``parameters`` block."""
+
+    key: str
+    resource: str | None = None
+    value: Any = None
+    options: list[str] | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+    step: float | None = None
+    unit: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 @dataclass
-class BoilerData:
-    temperature: float | None  = None
-    state: str                 = "unknown"
-    setpoint: float | None     = None
+class Widget:
+    """One widget from the /widgets payload."""
+
+    type: str
+    number: str | None
+    name: str
+    values: dict[str, Any]
+    parameters: dict[str, ParamInfo]
+    actions: dict[str, str]  # action key -> resource URL
 
 
 @dataclass
-class BufferData:
-    solar_mode_active: str    = "mode_off"
-    temperature: float | None = None
-
-
-@dataclass
-class HotWaterData:
-    temperature: float | None = None
-    setpoint: float | None    = None
-
-
-@dataclass
-class WidgetSnapshot:
+class HargassnerData:
     """Complete parsed state returned by GET /widgets."""
-    heating_circuit: HeatingCircuitData = field(default_factory=HeatingCircuitData)
-    boiler: BoilerData                  = field(default_factory=BoilerData)
-    buffer: BufferData                  = field(default_factory=BufferData)
-    hot_water: HotWaterData             = field(default_factory=HotWaterData)
-    pellet_stock_kg: float | None       = None
-    raw: dict[str, Any]                 = field(default_factory=dict, repr=False)
+
+    widgets: list[Widget] = field(default_factory=list)
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def widget(self, prefix: str) -> Widget | None:
+        for w in self.widgets:
+            if w.type.startswith(prefix):
+                return w
+        return None
+
+    def param(self, prefix: str, key: str) -> ParamInfo | None:
+        w = self.widget(prefix)
+        return w.parameters.get(key) if w else None
+
+    def action(self, prefix: str, key: str) -> str | None:
+        w = self.widget(prefix)
+        return w.actions.get(key) if w else None
+
+    def value(self, prefix: str, key: str, default: Any = None) -> Any:
+        w = self.widget(prefix)
+        if w and isinstance(w.values, dict):
+            return w.values.get(key, default)
+        return default
+
+    @property
+    def online(self) -> bool:
+        return bool(self.meta.get("online_state", True))
+
+    @property
+    def device_name(self) -> str:
+        w = self.widget(WIDGET_HEATER)
+        if w and w.values.get("name"):
+            return str(w.values["name"])
+        return "Hargassner"
+
+    @property
+    def device_model(self) -> str:
+        w = self.widget(WIDGET_HEATER)
+        if w and w.values.get("device_type"):
+            return str(w.values["device_type"])
+        return "Pellematic"
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,7 @@ class WidgetSnapshot:
 @dataclass
 class _TokenCache:
     access_token: str = ""
+    refresh_token: str = ""
     fetched_at: float = 0.0
 
     def is_valid(self) -> bool:
@@ -168,10 +170,11 @@ class _TokenCache:
             time.monotonic() - self.fetched_at < TOKEN_TTL_SECONDS
         )
 
-    def store(self, token: str) -> None:
+    def store(self, token: str, refresh: str | None = None) -> None:
         self.access_token = token
+        if refresh:
+            self.refresh_token = refresh
         self.fetched_at = time.monotonic()
-        _LOGGER.debug("Bearer token cached (TTL %s s)", TOKEN_TTL_SECONDS)
 
     def invalidate(self) -> None:
         self.access_token = ""
@@ -183,19 +186,7 @@ class _TokenCache:
 # ---------------------------------------------------------------------------
 
 class HargassnerApiClient:
-    """
-    Async client for the Hargassner Connect REST API.
-
-    Lifecycle
-    ---------
-    1.  Instantiate with ``session``, ``username``, ``password`` only.
-    2.  Call ``async_validate_credentials()`` — fetches app.js, extracts
-        client_id + client_secret, then performs the ROPC token grant.
-    3.  Call ``async_discover_installation_id()`` — returns available
-        installations for auto-selection.
-    4.  The coordinator calls ``async_get_widgets()`` on every poll.
-    5.  Control entities call the ``async_set_*`` methods on user interaction.
-    """
+    """Async client for the Hargassner Connect REST API."""
 
     def __init__(
         self,
@@ -204,15 +195,17 @@ class HargassnerApiClient:
         password: str,
         installation_id: str | int | None = None,
     ) -> None:
-        self._session          = session
-        self._username         = username
-        self._password         = password
-        self._installation_id: str | None = str(installation_id) if installation_id else None
-        self._client_id: str | None       = None
-        self._client_secret: str | None   = None
-        self._token            = _TokenCache()
-        self._token_lock       = asyncio.Lock()
-        self._creds_lock       = asyncio.Lock()
+        self._session = session
+        self._username = username
+        self._password = password
+        self._installation_id: str | None = (
+            str(installation_id) if installation_id else None
+        )
+        self._client_id: str | None = None
+        self._client_secret: str | None = None
+        self._scraped = False
+        self._token = _TokenCache()
+        self._token_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Properties
@@ -226,216 +219,182 @@ class HargassnerApiClient:
     def installation_id(self, value: str | int) -> None:
         self._installation_id = str(value)
 
-    @property
-    def _api_base(self) -> str:
-        if not self._installation_id:
-            raise HargassnerError(
-                "Installation ID not set — call async_discover_installation_id() first."
+    def _headers(self, auth: bool = True) -> dict[str, str]:
+        headers = {"User-Agent": USER_AGENT, "Branding": APP_BRANDING}
+        if auth and self._token.access_token:
+            headers["Authorization"] = f"Bearer {self._token.access_token}"
+        return headers
+
+    # ------------------------------------------------------------------
+    # Credential handling
+    # ------------------------------------------------------------------
+
+    async def _async_scrape_credentials(self) -> tuple[str, str]:
+        """
+        Fallback: extract client_id/secret from the live JS bundle.
+
+        Discovers the current hashed entry bundle via the Vite manifest (with an
+        HTML and legacy fallback), then extracts by call-site anchor.
+        """
+        js = ""
+        # 1) Vite manifest -> entry bundle
+        try:
+            async with self._session.get(
+                MANIFEST_URL, headers=self._headers(auth=False), timeout=REQUEST_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    manifest = await resp.json(content_type=None)
+                    entry = next(
+                        (v["file"] for v in manifest.values()
+                         if isinstance(v, dict) and v.get("isEntry")),
+                        None,
+                    )
+                    if entry:
+                        js = await self._async_fetch_text(f"{PORTAL_URL}/build/{entry}")
+        except (aiohttp.ClientError, ValueError) as exc:
+            _LOGGER.debug("Manifest discovery failed: %s", exc)
+
+        # 2) HTML fallback — find build/assets/app-*.js
+        if not js:
+            html = await self._async_fetch_text(PORTAL_URL)
+            m = re.search(r"build/assets/app-[\w-]+\.js", html or "")
+            if m:
+                js = await self._async_fetch_text(f"{PORTAL_URL}/{m.group(0)}")
+
+        # 3) Legacy fallback — old static bundle
+        if not js:
+            js = await self._async_fetch_text(_LEGACY_APP_JS)
+
+        if not js:
+            raise HargassnerSecretError(
+                "Could not fetch the Hargassner Connect JS bundle to extract "
+                "OAuth client credentials."
             )
-        return f"{API_BASE}/{self._installation_id}"
 
-    # ------------------------------------------------------------------
-    # Step 1 — Extract client_id + client_secret from app.js
-    # ------------------------------------------------------------------
+        anchor = _ANCHOR_RE.search(js)
+        if anchor:
+            id_var, sec_var = anchor.group(1), anchor.group(2)
+            cid_m = re.search(rf'\b{id_var}="([^"]+)"', js)
+            sec_m = re.search(rf'\b{sec_var}="([^"]+)"', js)
+            if cid_m and sec_m:
+                _LOGGER.info("Re-extracted OAuth client credentials from portal bundle")
+                return cid_m.group(1), sec_m.group(1)
 
-    async def async_discover_oauth_credentials(self) -> tuple[str, str]:
-        """
-        Fetch ``/js/app.js`` and extract the OAuth client_id and client_secret.
+        # Legacy direct-object pattern
+        legacy = re.search(r'o="(\d+)",n="([^"]+)"', js)
+        if legacy:
+            return legacy.group(1), legacy.group(2)
 
-        The file is served without a cache-busting hash, making it a stable
-        fetch target.  The regex  o=\"(\d+)\",n=\"([^\"]+)\"  captures both values.
-
-        Returns ``(client_id, client_secret)`` on success.
-        Raises ``HargassnerSecretError`` if the pattern is not found.
-        Raises ``HargassnerConnectionError`` on network failure.
-        Result is cached for the lifetime of this client instance.
-        """
-        async with self._creds_lock:
-            if self._client_id and self._client_secret:
-                return self._client_id, self._client_secret
-
-            _LOGGER.debug("Fetching OAuth credentials from %s", APP_JS_URL)
-            try:
-                async with self._session.get(
-                    APP_JS_URL, timeout=REQUEST_TIMEOUT
-                ) as resp:
-                    if resp.status != 200:
-                        raise HargassnerConnectionError(
-                            f"HTTP {resp.status} fetching app.js"
-                        )
-                    js = await resp.text()
-            except aiohttp.ClientError as exc:
-                raise HargassnerConnectionError(
-                    f"Network error fetching app.js: {exc}"
-                ) from exc
-
-            m = _OAUTH_CREDS_RE.search(js)
-            if not m:
-                raise HargassnerSecretError(
-                    "Could not locate OAuth credentials in /js/app.js. "
-                    "The JS pattern may have changed — please open a GitHub issue."
-                )
-
-            self._client_id     = m.group(1)
-            self._client_secret = m.group(2)
-            _LOGGER.debug(
-                "OAuth credentials extracted — client_id=%s, secret_len=%d",
-                self._client_id, len(self._client_secret),
-            )
-            return self._client_id, self._client_secret
-
-    # ------------------------------------------------------------------
-    # Step 2 — Authentication (token)
-    # ------------------------------------------------------------------
-
-    async def async_validate_credentials(self) -> str:
-        """
-        Validate email/password by fetching a fresh token.
-
-        Internally calls ``async_discover_oauth_credentials()`` first.
-        Returns the raw access_token on success.
-        """
-        await self.async_discover_oauth_credentials()
-        async with self._token_lock:
-            self._token.invalidate()
-            return await self._async_fetch_token()
-
-    async def _async_get_token(self) -> str:
-        """Return a valid Bearer token, refreshing transparently when stale."""
-        if not (self._client_id and self._client_secret):
-            await self.async_discover_oauth_credentials()
-        async with self._token_lock:
-            if self._token.is_valid():
-                return self._token.access_token
-            return await self._async_fetch_token()
-
-    async def _async_fetch_token(self) -> str:
-        """
-        POST /oauth/token — ROPC grant.
-        Must be called with ``_token_lock`` held.
-        """
-        assert self._client_id and self._client_secret, (
-            "OAuth credentials must be populated before token fetch"
+        raise HargassnerSecretError(
+            "Could not locate OAuth client credentials in the portal JS bundle. "
+            "The structure may have changed — please open a GitHub issue."
         )
 
+    async def _async_fetch_text(self, url: str) -> str:
+        try:
+            async with self._session.get(
+                url, headers=self._headers(auth=False), timeout=REQUEST_TIMEOUT
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.debug("GET %s -> HTTP %s", url, resp.status)
+                    return ""
+                return await resp.text()
+        except aiohttp.ClientError as exc:
+            _LOGGER.debug("GET %s failed: %s", url, exc)
+            return ""
+
+    # ------------------------------------------------------------------
+    # Token
+    # ------------------------------------------------------------------
+
+    async def _post_token(self, cid: str, csec: str) -> tuple[int, dict[str, Any]]:
         payload = {
-            "grant_type":    "password",
-            "client_id":     self._client_id,
-            "client_secret": self._client_secret,
-            "username":      self._username,
-            "password":      self._password,
+            "grant_type": "password",
+            "client_id": cid,
+            "client_secret": csec,
+            "username": self._username,
+            "password": self._password,
         }
         try:
             async with self._session.post(
-                TOKEN_URL, data=payload, timeout=REQUEST_TIMEOUT
+                TOKEN_URL,
+                data=payload,
+                headers=self._headers(auth=False),
+                timeout=REQUEST_TIMEOUT,
             ) as resp:
-                if resp.status == 401:
-                    raise HargassnerAuthError(
-                        "Authentication failed — please check your Hargassner "
-                        "Connect email and password."
-                    )
-                if resp.status != 200:
-                    raise HargassnerApiError(resp.status, "Token endpoint error")
-
-                body = await resp.json(content_type=None)
-                token: str = body.get("access_token", "")
-                if not token:
-                    raise HargassnerAuthError(
-                        "Token endpoint returned an empty access_token."
-                    )
-                self._token.store(token)
-                return token
-
+                if resp.status == 200:
+                    return resp.status, await resp.json(content_type=None)
+                body = await resp.text()
+                _LOGGER.debug("Token endpoint HTTP %s: %s", resp.status, body[:200])
+                return resp.status, {}
         except aiohttp.ClientError as exc:
             raise HargassnerConnectionError(
                 f"Network error during token fetch: {exc}"
             ) from exc
 
-    # ------------------------------------------------------------------
-    # Step 3 — Installation ID auto-discovery
-    # ------------------------------------------------------------------
+    async def _async_fetch_token(self) -> str:
+        """Obtain a valid Bearer token, refreshing/re-authenticating as needed."""
+        async with self._token_lock:
+            if self._token.is_valid():
+                return self._token.access_token
 
-    async def async_discover_installation_id(self) -> list[dict[str, Any]]:
-        """
-        Return a list of installations accessible to this account.
+            cid = self._client_id or DEFAULT_CLIENT_ID
+            csec = self._client_secret or DEFAULT_CLIENT_SECRET
 
-        Each entry is ``{"id": str, "name": str}``.
-        Raises ``HargassnerError`` if no installations are found.
-        """
-        for endpoint in (
-            f"{PORTAL_URL}/api/user/installations",
-            f"{PORTAL_URL}/api/installations",
-        ):
-            try:
-                raw = await self._async_get(endpoint)
-                installations = self._parse_installations(raw)
-                if installations:
-                    _LOGGER.debug(
-                        "Discovered %d installation(s) via %s",
-                        len(installations), endpoint,
-                    )
-                    return installations
-            except HargassnerApiError as exc:
-                if exc.status == 404:
-                    _LOGGER.debug("Endpoint %s returned 404, trying next", endpoint)
-                    continue
-                raise
+            status, body = await self._post_token(cid, csec)
 
-        raise HargassnerError(
-            "Could not auto-discover any Hargassner installations for this account."
-        )
+            # Built-in client credentials rejected — try re-extracting once.
+            if status == 401 and not self._scraped:
+                _LOGGER.warning(
+                    "Token rejected with built-in client credentials; "
+                    "re-extracting from the portal bundle"
+                )
+                cid, csec = await self._async_scrape_credentials()
+                self._scraped = True
+                status, body = await self._post_token(cid, csec)
 
-    @staticmethod
-    def _parse_installations(raw: Any) -> list[dict[str, Any]]:
-        if isinstance(raw, list):
-            return [
-                {
-                    "id":   str(item.get("id", "")),
-                    "name": item.get("name", f"Installation {item.get('id', '?')}"),
-                }
-                for item in raw if item.get("id")
-            ]
-        if isinstance(raw, dict):
-            items = raw.get("data", raw.get("installations", []))
-            return HargassnerApiClient._parse_installations(items)
-        return []
+            if status == 401:
+                raise HargassnerAuthError(
+                    "Authentication failed — please check your Hargassner "
+                    "Connect email and password."
+                )
+            if status != 200:
+                raise HargassnerApiError(status, "Token endpoint error")
+
+            token = body.get("access_token", "")
+            if not token:
+                raise HargassnerAuthError("Token endpoint returned an empty access_token.")
+
+            self._client_id, self._client_secret = cid, csec
+            self._token.store(token, body.get("refresh_token"))
+            _LOGGER.debug("Bearer token cached (refresh_token %s)",
+                          "present" if body.get("refresh_token") else "absent")
+            return token
+
+    async def async_validate_credentials(self) -> str:
+        """Validate email/password by fetching a fresh token."""
+        self._token.invalidate()
+        return await self._async_fetch_token()
 
     # ------------------------------------------------------------------
-    # Internal HTTP helpers
+    # HTTP helpers (authenticated, with 401 retry)
     # ------------------------------------------------------------------
 
     async def _async_request(
-        self,
-        method: str,
-        url: str,
-        *,
-        json: Any = None,
-        _retry: bool = True,
+        self, method: str, url: str, *, json: Any = None, _retry: bool = True
     ) -> aiohttp.ClientResponse:
-        """
-        Authenticated request with automatic 401 → credential re-extraction
-        → token refresh → single retry.
-        """
-        token = await self._async_get_token()
-        headers = {"Authorization": f"Bearer {token}"}
+        await self._async_fetch_token()
         try:
             resp = await self._session.request(
-                method, url, headers=headers, json=json, timeout=REQUEST_TIMEOUT
+                method, url, headers=self._headers(), json=json, timeout=REQUEST_TIMEOUT
             )
         except aiohttp.ClientError as exc:
-            raise HargassnerConnectionError(
-                f"Request failed [{method} {url}]: {exc}"
-            ) from exc
+            raise HargassnerConnectionError(f"Request failed [{method} {url}]: {exc}") from exc
 
         if resp.status == 401 and _retry:
-            _LOGGER.debug("401 received — re-extracting credentials and retrying")
-            async with self._creds_lock:
-                self._client_id = None
-                self._client_secret = None
-            await self.async_discover_oauth_credentials()
-            async with self._token_lock:
-                self._token.invalidate()
-                await self._async_fetch_token()
+            _LOGGER.debug("401 received — refreshing token and retrying")
+            self._token.invalidate()
+            await self._async_fetch_token()
             return await self._async_request(method, url, json=json, _retry=False)
 
         return resp
@@ -446,184 +405,121 @@ class HargassnerApiClient:
             raise HargassnerApiError(resp.status, f"GET {url}")
         return await resp.json(content_type=None)
 
-    async def _async_patch(self, endpoint: str, value: Any) -> None:
-        url = f"{self._api_base}/{endpoint}"
-        resp = await self._async_request("PATCH", url, json={"value": value})
-        if resp.status not in (200, 204):
-            raise HargassnerApiError(resp.status, f"PATCH {endpoint}")
-        _LOGGER.debug("PATCH %s = %r [%s]", endpoint, value, resp.status)
+    # ------------------------------------------------------------------
+    # Installation discovery
+    # ------------------------------------------------------------------
 
-    async def _async_post_action(self, endpoint: str) -> None:
-        url = f"{self._api_base}/{endpoint}"
-        resp = await self._async_request("POST", url)
-        if resp.status not in (200, 204):
-            raise HargassnerApiError(resp.status, f"POST {endpoint}")
-        _LOGGER.debug("POST %s [%s]", endpoint, resp.status)
+    async def async_discover_installation_id(self) -> list[dict[str, Any]]:
+        """Return a list of installations accessible to this account."""
+        for endpoint in (
+            f"{API_URL}/installations",
+            f"{API_URL}/user/installations",
+        ):
+            try:
+                raw = await self._async_get(endpoint)
+            except HargassnerApiError as exc:
+                if exc.status == 404:
+                    _LOGGER.debug("Endpoint %s returned 404, trying next", endpoint)
+                    continue
+                raise
+            installations = self._parse_installations(raw)
+            if installations:
+                _LOGGER.debug("Discovered %d installation(s) via %s",
+                              len(installations), endpoint)
+                return installations
+
+        raise HargassnerError(
+            "Could not auto-discover any Hargassner installations for this account."
+        )
+
+    @staticmethod
+    def _parse_installations(raw: Any) -> list[dict[str, Any]]:
+        if isinstance(raw, dict):
+            raw = raw.get("data", raw.get("installations", []))
+        if isinstance(raw, list):
+            return [
+                {
+                    "id": str(item.get("id", "")),
+                    "name": item.get("name", f"Installation {item.get('id', '?')}"),
+                }
+                for item in raw
+                if isinstance(item, dict) and item.get("id")
+            ]
+        return []
 
     # ------------------------------------------------------------------
     # Read — GET /widgets
     # ------------------------------------------------------------------
 
-    async def async_get_widgets(self) -> WidgetSnapshot:
-        """Fetch the complete installation state in one API call."""
-        raw = await self._async_get(f"{self._api_base}/widgets")
-        return self._parse_widgets(raw)
-
-    # ------------------------------------------------------------------
-    # Widget parsing
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _pv(params: dict, key: str, default: Any = None) -> Any:
-        entry = params.get(key)
-        if isinstance(entry, dict):
-            return entry.get("value", default)
-        return default
+    async def async_get_data(self) -> HargassnerData:
+        """Fetch and parse the complete installation state."""
+        if not self._installation_id:
+            raise HargassnerError("Installation ID not set.")
+        raw = await self._async_get(
+            f"{API_URL}/installations/{self._installation_id}/widgets"
+        )
+        return self._parse(raw)
 
     @staticmethod
-    def _safe_float(value: Any) -> float | None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _api_to_ha_mode(value: Any) -> str:
-        """Convert API uppercase MODE_* string to lowercase HA translation key."""
-        if isinstance(value, str):
-            return value.lower()
-        return "unknown"
-
-    def _parse_widgets(self, raw: dict) -> WidgetSnapshot:
-        snap = WidgetSnapshot(raw=raw)
+    def _parse(raw: dict) -> HargassnerData:
+        widgets: list[Widget] = []
         for w in raw.get("data", []):
-            wtype: str   = w.get("widget", "")
-            params: dict = w.get("parameters", {})
+            wtype = w.get("widget", "")
+            vals = w.get("values", {})
+            values = vals if isinstance(vals, dict) else {}
 
-            if wtype == "HEATING_CIRCUIT_RADIATOR":
-                snap.heating_circuit = HeatingCircuitData(
-                    mode=self._api_to_ha_mode(self._pv(params, "mode", "unknown")),
-                    room_temp_correction=float(
-                        self._pv(params, "room_temperature_correction", 0.0)
-                    ),
-                    room_temp_heating=float(
-                        self._pv(params, "room_temperature_heating", 20.0)
-                    ),
-                    room_temp_reduction=float(
-                        self._pv(params, "room_temperature_reduction", 18.0)
-                    ),
-                    steepness=float(self._pv(params, "steepness", 1.5)),
-                    deactivation_limit_heating=float(
-                        self._pv(params, "deactivation_limit_heating", 15.0)
-                    ),
-                    deactivation_limit_reduction_day=float(
-                        self._pv(params, "deactivation_limit_reduction_day", 15.0)
-                    ),
-                    deactivation_limit_reduction_night=float(
-                        self._pv(params, "deactivation_limit_reduction_night", 15.0)
-                    ),
-                    bathroom_heating=self._api_to_ha_mode(
-                        self._pv(params, "bathroom_heating", "MODE_OFF")
-                    ),
-                )
-            elif wtype == "BOILER":
-                snap.boiler = BoilerData(
-                    temperature=self._safe_float(self._pv(params, "boiler_temperature")),
-                    setpoint=self._safe_float(self._pv(params, "boiler_setpoint")),
-                    state=self._pv(params, "boiler_state", "unknown"),
-                )
-                pellets = self._pv(params, "fuel_stock")
-                if pellets is not None:
-                    snap.pellet_stock_kg = self._safe_float(pellets)
-            elif wtype == "BUFFER":
-                snap.buffer = BufferData(
-                    solar_mode_active=self._api_to_ha_mode(
-                        self._pv(params, "solar_mode_active", "MODE_OFF")
-                    ),
-                    temperature=self._safe_float(self._pv(params, "buffer_temperature")),
-                )
-            elif wtype == "HOT_WATER":
-                snap.hot_water = HotWaterData(
-                    temperature=self._safe_float(self._pv(params, "water_temperature")),
-                    setpoint=self._safe_float(self._pv(params, "water_setpoint")),
+            params: dict[str, ParamInfo] = {}
+            for key, entry in (w.get("parameters") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                if "resource" not in entry and "value" not in entry:
+                    continue
+                params[key] = ParamInfo(
+                    key=key,
+                    resource=entry.get("resource"),
+                    value=entry.get("value"),
+                    options=entry.get("options"),
+                    minimum=entry.get("min"),
+                    maximum=entry.get("max"),
+                    step=entry.get("step"),
+                    unit=entry.get("unit"),
+                    raw=entry,
                 )
 
-        return snap
+            actions: dict[str, str] = {}
+            for key, entry in (w.get("actions") or {}).items():
+                if isinstance(entry, dict) and entry.get("resource"):
+                    actions[key] = entry["resource"]
+
+            widgets.append(
+                Widget(
+                    type=wtype,
+                    number=w.get("number"),
+                    name=str(values.get("name") or wtype.replace("_", " ").title()),
+                    values=values,
+                    parameters=params,
+                    actions=actions,
+                )
+            )
+
+        return HargassnerData(widgets=widgets, meta=raw.get("meta", {}))
 
     # ------------------------------------------------------------------
-    # Write — Heating Circuit
-    # (HA uses lowercase mode keys; API expects uppercase MODE_* strings)
+    # Write — generic, resource-based
     # ------------------------------------------------------------------
 
-    async def async_set_heating_mode(self, mode: HeatingMode | str) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/mode", str(mode).upper()
-        )
+    async def async_patch_resource(self, resource: str, value: Any) -> None:
+        """PATCH a parameter's resource URL with a new value."""
+        url = f"{API_URL}{resource}"
+        resp = await self._async_request("PATCH", url, json={"value": value})
+        if resp.status not in (200, 204):
+            raise HargassnerApiError(resp.status, f"PATCH {resource}")
+        _LOGGER.debug("PATCH %s = %r [%s]", resource, value, resp.status)
 
-    async def async_set_room_temp_correction(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/room-temperature-correction",
-            round(value, 1),
-        )
-
-    async def async_set_room_temp_heating(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/room-temperature-heating",
-            round(value, 1),
-        )
-
-    async def async_set_room_temp_reduction(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/room-temperature-reduction",
-            round(value, 1),
-        )
-
-    async def async_set_steepness(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/steepness",
-            round(value, 2),
-        )
-
-    async def async_set_bathroom_heating(self, mode: BathroomHeating | str) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/1/parameters/bathroom-heating", str(mode).upper()
-        )
-
-    async def async_set_deactivation_limit_heating(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/all/parameters/deactivation-limit-heating",
-            round(value, 1),
-        )
-
-    async def async_set_deactivation_limit_reduction_day(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/all/parameters/deactivation-limit-reduction-day",
-            round(value, 1),
-        )
-
-    async def async_set_deactivation_limit_reduction_night(self, value: float) -> None:
-        await self._async_patch(
-            "widgets/heating-circuits/all/parameters/deactivation-limit-reduction-night",
-            round(value, 1),
-        )
-
-    # ------------------------------------------------------------------
-    # Write — Boiler
-    # ------------------------------------------------------------------
-
-    async def async_force_charge(self) -> None:
-        await self._async_post_action("widgets/boilers/1/actions/force-charging")
-
-    async def async_set_pellet_stock(self, kg: float) -> None:
-        await self._async_patch(
-            "widgets/heater/parameters/fuel-stock", round(kg, 0)
-        )
-
-    # ------------------------------------------------------------------
-    # Write — Buffer / Solar
-    # ------------------------------------------------------------------
-
-    async def async_set_solar_mode(self, mode: SolarMode | str) -> None:
-        await self._async_patch(
-            "widgets/buffer/default/parameters/solar-mode-active", str(mode).upper()
-        )
+    async def async_post_action(self, resource: str) -> None:
+        """POST to an action resource URL."""
+        url = f"{API_URL}{resource}"
+        resp = await self._async_request("POST", url)
+        if resp.status not in (200, 204):
+            raise HargassnerApiError(resp.status, f"POST {resource}")
+        _LOGGER.debug("POST %s [%s]", resource, resp.status)
