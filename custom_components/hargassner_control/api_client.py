@@ -5,12 +5,16 @@ Reverse-engineered from web.hargassner.at network traffic.
 
 Authentication
 --------------
-OAuth 2.0 ROPC ("password") grant. The OAuth *client* credentials
-(``client_id`` / ``client_secret``) are PUBLIC application identifiers shipped in
-the Connect web/app clients — not user secrets. They are hardcoded in
+JSON login against ``/api/auth/login`` with the user's email + password plus the
+*public* application ``client_id`` / ``client_secret`` that ship inside the
+Connect web client. Those two are not user secrets; they are hardcoded in
 ``const.py`` (see the note there). If a hardcoded value is ever rejected, the
 client falls back to re-extracting the values from the live JS bundle, which is
-now a hashed Vite build discovered via ``/build/manifest.json``.
+a hashed Vite build discovered via ``/build/manifest.json``.
+
+Until September 2026 the portal used an OAuth 2.0 ROPC grant at
+``/oauth/token``. That endpoint has been removed and answers HTTP 404; it is
+still tried as a fallback, but only after the current endpoint 404s.
 
 The user only ever provides email + password.
 """
@@ -30,16 +34,19 @@ from .const import (
     APP_BRANDING,
     DEFAULT_CLIENT_ID,
     DEFAULT_CLIENT_SECRET,
+    LEGACY_TOKEN_URL,
+    LOGIN_URL,
     MANIFEST_URL,
     PORTAL_URL,
-    TOKEN_URL,
+    REFRESH_URL,
     USER_AGENT,
     WIDGET_HEATER,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-TOKEN_TTL_SECONDS = 1800  # 30 min safety margin (real TTL ~3600 s)
+TOKEN_TTL_SECONDS = 1800.0  # fallback when the API reports no expires_in
+TOKEN_RENEW_MARGIN = 300.0  # renew this many seconds before the server expiry
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=25)
 
 # Fallback only. Extracts the OAuth client_id/secret from the minified JS bundle
@@ -164,21 +171,36 @@ class _TokenCache:
     access_token: str = ""
     refresh_token: str = ""
     fetched_at: float = 0.0
+    ttl: float = TOKEN_TTL_SECONDS
 
     def is_valid(self) -> bool:
         return bool(self.access_token) and (
-            time.monotonic() - self.fetched_at < TOKEN_TTL_SECONDS
+            time.monotonic() - self.fetched_at < self.ttl
         )
 
-    def store(self, token: str, refresh: str | None = None) -> None:
+    def store(
+        self,
+        token: str,
+        refresh: str | None = None,
+        expires_in: Any = None,
+    ) -> None:
         self.access_token = token
         if refresh:
             self.refresh_token = refresh
+        try:
+            if expires_in:
+                self.ttl = max(60.0, float(expires_in) - TOKEN_RENEW_MARGIN)
+        except (TypeError, ValueError):
+            self.ttl = TOKEN_TTL_SECONDS
         self.fetched_at = time.monotonic()
 
     def invalidate(self) -> None:
         self.access_token = ""
         self.fetched_at = 0.0
+
+    def clear(self) -> None:
+        self.invalidate()
+        self.refresh_token = ""
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +268,8 @@ class HargassnerApiClient:
                     manifest = await resp.json(content_type=None)
                     entry = next(
                         (v["file"] for v in manifest.values()
-                         if isinstance(v, dict) and v.get("isEntry")),
+                         if isinstance(v, dict) and v.get("isEntry")
+                         and str(v.get("file", "")).endswith(".js")),
                         None,
                     )
                     if entry:
@@ -268,7 +291,7 @@ class HargassnerApiClient:
         if not js:
             raise HargassnerSecretError(
                 "Could not fetch the Hargassner Connect JS bundle to extract "
-                "OAuth client credentials."
+                "the application client credentials."
             )
 
         anchor = _ANCHOR_RE.search(js)
@@ -277,7 +300,7 @@ class HargassnerApiClient:
             cid_m = re.search(rf'\b{id_var}="([^"]+)"', js)
             sec_m = re.search(rf'\b{sec_var}="([^"]+)"', js)
             if cid_m and sec_m:
-                _LOGGER.info("Re-extracted OAuth client credentials from portal bundle")
+                _LOGGER.info("Re-extracted client credentials from portal bundle")
                 return cid_m.group(1), sec_m.group(1)
 
         # Legacy direct-object pattern
@@ -286,8 +309,9 @@ class HargassnerApiClient:
             return legacy.group(1), legacy.group(2)
 
         raise HargassnerSecretError(
-            "Could not locate OAuth client credentials in the portal JS bundle. "
-            "The structure may have changed — please open a GitHub issue."
+            "Could not locate the application client credentials in the portal "
+            "JS bundle. The structure may have changed — please open a GitHub "
+            "issue."
         )
 
     async def _async_fetch_text(self, url: str) -> str:
@@ -307,7 +331,40 @@ class HargassnerApiClient:
     # Token
     # ------------------------------------------------------------------
 
-    async def _post_token(self, cid: str, csec: str) -> tuple[int, dict[str, Any]]:
+    @staticmethod
+    def _unwrap(body: Any) -> dict[str, Any]:
+        """Return the token object, whether or not it is wrapped in ``data``."""
+        if not isinstance(body, dict):
+            return {}
+        inner = body.get("data")
+        if isinstance(inner, dict) and "access_token" in inner:
+            return inner
+        return body
+
+    async def _post_json(
+        self, url: str, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        try:
+            async with self._session.post(
+                url,
+                json=payload,
+                headers=self._headers(auth=False),
+                timeout=REQUEST_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    return resp.status, await resp.json(content_type=None)
+                body = await resp.text()
+                _LOGGER.debug("POST %s -> HTTP %s: %s", url, resp.status, body[:200])
+                return resp.status, {}
+        except aiohttp.ClientError as exc:
+            raise HargassnerConnectionError(
+                f"Network error during POST {url}: {exc}"
+            ) from exc
+
+    async def _post_legacy_token(
+        self, cid: str, csec: str
+    ) -> tuple[int, dict[str, Any]]:
+        """Pre-September-2026 OAuth password grant. Kept as a fallback only."""
         payload = {
             "grant_type": "password",
             "client_id": cid,
@@ -317,7 +374,7 @@ class HargassnerApiClient:
         }
         try:
             async with self._session.post(
-                TOKEN_URL,
+                LEGACY_TOKEN_URL,
                 data=payload,
                 headers=self._headers(auth=False),
                 timeout=REQUEST_TIMEOUT,
@@ -325,12 +382,62 @@ class HargassnerApiClient:
                 if resp.status == 200:
                     return resp.status, await resp.json(content_type=None)
                 body = await resp.text()
-                _LOGGER.debug("Token endpoint HTTP %s: %s", resp.status, body[:200])
+                _LOGGER.debug(
+                    "Legacy token endpoint HTTP %s: %s", resp.status, body[:200]
+                )
                 return resp.status, {}
         except aiohttp.ClientError as exc:
             raise HargassnerConnectionError(
-                f"Network error during token fetch: {exc}"
+                f"Network error during legacy token fetch: {exc}"
             ) from exc
+
+    async def _async_login(self, cid: str, csec: str) -> tuple[int, dict[str, Any]]:
+        """Log in against the current endpoint, falling back to the old one."""
+        status, body = await self._post_json(
+            LOGIN_URL,
+            {
+                "email": self._username,
+                "password": self._password,
+                "client_id": cid,
+                "client_secret": csec,
+            },
+        )
+        if status == 404:
+            _LOGGER.debug(
+                "%s returned 404 — trying the legacy OAuth token endpoint",
+                LOGIN_URL,
+            )
+            status, body = await self._post_legacy_token(cid, csec)
+        return status, body
+
+    async def _async_try_refresh(self) -> str:
+        """Exchange the refresh token for a new access token. '' on failure."""
+        cid = self._client_id or DEFAULT_CLIENT_ID
+        csec = self._client_secret or DEFAULT_CLIENT_SECRET
+        status, body = await self._post_json(
+            REFRESH_URL,
+            {
+                "refresh_token": self._token.refresh_token,
+                "client_id": cid,
+                "client_secret": csec,
+            },
+        )
+        if status != 200:
+            _LOGGER.debug(
+                "Refresh failed (HTTP %s) — falling back to a full login", status
+            )
+            self._token.clear()
+            return ""
+
+        data = self._unwrap(body)
+        token = data.get("access_token", "")
+        if token:
+            self._token.store(
+                token, data.get("refresh_token"), data.get("expires_in")
+            )
+        else:
+            self._token.clear()
+        return token
 
     async def _async_fetch_token(self) -> str:
         """Obtain a valid Bearer token, refreshing/re-authenticating as needed."""
@@ -338,42 +445,55 @@ class HargassnerApiClient:
             if self._token.is_valid():
                 return self._token.access_token
 
+            if self._token.refresh_token:
+                refreshed = await self._async_try_refresh()
+                if refreshed:
+                    return refreshed
+
             cid = self._client_id or DEFAULT_CLIENT_ID
             csec = self._client_secret or DEFAULT_CLIENT_SECRET
 
-            status, body = await self._post_token(cid, csec)
+            status, body = await self._async_login(cid, csec)
 
             # Built-in client credentials rejected — try re-extracting once.
-            if status == 401 and not self._scraped:
+            if status in (400, 401) and not self._scraped:
                 _LOGGER.warning(
-                    "Token rejected with built-in client credentials; "
-                    "re-extracting from the portal bundle"
+                    "Login rejected with the built-in client credentials; "
+                    "re-extracting them from the portal bundle"
                 )
                 cid, csec = await self._async_scrape_credentials()
                 self._scraped = True
-                status, body = await self._post_token(cid, csec)
+                status, body = await self._async_login(cid, csec)
 
-            if status == 401:
+            if status in (401, 403, 422):
                 raise HargassnerAuthError(
                     "Authentication failed — please check your Hargassner "
                     "Connect email and password."
                 )
             if status != 200:
-                raise HargassnerApiError(status, "Token endpoint error")
+                raise HargassnerApiError(status, f"Login endpoint error ({LOGIN_URL})")
 
-            token = body.get("access_token", "")
+            data = self._unwrap(body)
+            token = data.get("access_token", "")
             if not token:
-                raise HargassnerAuthError("Token endpoint returned an empty access_token.")
+                raise HargassnerAuthError(
+                    "Login succeeded but returned no access_token."
+                )
 
             self._client_id, self._client_secret = cid, csec
-            self._token.store(token, body.get("refresh_token"))
-            _LOGGER.debug("Bearer token cached (refresh_token %s)",
-                          "present" if body.get("refresh_token") else "absent")
+            self._token.store(
+                token, data.get("refresh_token"), data.get("expires_in")
+            )
+            _LOGGER.debug(
+                "Bearer token cached for %.0fs (refresh_token %s)",
+                self._token.ttl,
+                "present" if self._token.refresh_token else "absent",
+            )
             return token
 
     async def async_validate_credentials(self) -> str:
-        """Validate email/password by fetching a fresh token."""
-        self._token.invalidate()
+        """Validate email/password by performing a fresh login."""
+        self._token.clear()
         return await self._async_fetch_token()
 
     # ------------------------------------------------------------------
@@ -392,8 +512,8 @@ class HargassnerApiClient:
             raise HargassnerConnectionError(f"Request failed [{method} {url}]: {exc}") from exc
 
         if resp.status == 401 and _retry:
-            _LOGGER.debug("401 received — refreshing token and retrying")
-            self._token.invalidate()
+            _LOGGER.debug("401 received — re-authenticating and retrying")
+            self._token.clear()
             await self._async_fetch_token()
             return await self._async_request(method, url, json=json, _retry=False)
 
