@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.3] - 2026-09-04
+
+Fixes-only release. Restores login after Hargassner replaced the portal's OAuth
+endpoint. Everyone on 0.1.2 is affected and should update.
+
+### Fixed
+- **Login broken for all users (#6, #7, and the follow-up on #3).** Hargassner
+  removed the OAuth password grant at `/oauth/token`; it now answers HTTP 404,
+  so both setup and startup failed with
+  `HargassnerApiError: API returned 404: Token endpoint error`. The integration
+  now authenticates against the current endpoint, `POST /api/auth/login`, with a
+  JSON body of `email`, `password`, `client_id` and `client_secret`. The old
+  endpoint is still tried, but only as a fallback when the new one 404s.
+- **Token lifetime.** The access token is renewed using `POST /api/auth/refresh`
+  with the `refresh_token` instead of a full re-login, and the API's own
+  `expires_in` is honoured rather than a fixed 30-minute TTL.
+- **Misleading setup error.** HTTP 403 and 422 from the login endpoint are now
+  treated as authentication failures, so the config flow reports
+  "invalid credentials" instead of "unknown error".
+- The built-in application `client_id` / `client_secret` were re-verified against
+  the live portal bundle and are unchanged; the self-healing re-extraction
+  fallback still matches the current build.
+
+---
+
 ## [0.1.2] - 2026-07-15
 
 Fixes-only release. Restores the integration after Hargassner rebuilt the Connect
