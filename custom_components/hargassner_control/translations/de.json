@@ -70,7 +70,7 @@
         "name": "Kessel Programm",
         "state": {
           "program_off": "Aus",
-          "program_boiler": "Kessel",
+          "program_boiler": "Boiler",
           "program_automatic": "Automatik",
           "program_stop_firing": "Feuerung Aus"
         }
