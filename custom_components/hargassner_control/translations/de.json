@@ -72,7 +72,7 @@
           "program_off": "Aus",
           "program_boiler": "Kessel",
           "program_automatic": "Automatik",
-          "program_stop_firing": "Ausbrennen"
+          "program_stop_firing": "Feuerung Aus"
         }
       },
       "bathroom_heating": {
